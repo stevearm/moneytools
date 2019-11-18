@@ -11,6 +11,7 @@ def main():
     parser = argparse.ArgumentParser(description="Create a GNUCash book from YNAB export")
     parser.add_argument("--verbose", action="store_true", help="Print lots of messages")
     parser.add_argument("--budget", required=True, help="Budget csv to read from")
+    parser.add_argument("--register", required=True, help="Register csv to read from")
     parser.add_argument("--book", default="book.gnucash", help="Output file to overwrite")
     args = parser.parse_args()
 
@@ -20,6 +21,7 @@ def main():
     book = piecash.create_book(sqlite_file=args.book, overwrite=True, currency="USD")
 
     createAccountsForCategories(book, args.budget)
+    createAccountsForTransactions(book, args.register)
 
 
 def createAccountsForCategories(book, budgetCsv):
@@ -49,6 +51,32 @@ def createAccountsForCategories(book, budgetCsv):
                             type="EXPENSE",
                             parent=groupAccount,
                             commodity=currency)
+    book.save()
+
+
+def createAccountsForTransactions(book, registerCsv):
+    accounts = set()
+    for rowDict in readCsvDict(registerCsv):
+        accounts.add(rowDict["Account"])
+    if VERBOSE:
+        print("{} asset accounts".format(len(accounts)))
+
+    currency = book.default_currency
+    assetsAccount = piecash.Account(name="Assets",
+                                    type="ASSET",
+                                    parent=book.root_account,
+                                    commodity=currency,
+                                    placeholder=True)
+    assetsAccount = piecash.Account(name="Current Assets",
+                                    type="ASSET",
+                                    parent=assetsAccount,
+                                    commodity=currency,
+                                    placeholder=True)
+    for account in accounts:
+        piecash.Account(name=account,
+                        type="ASSET",
+                        parent=assetsAccount,
+                        commodity=currency)
     book.save()
 
 

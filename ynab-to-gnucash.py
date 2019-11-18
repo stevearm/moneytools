@@ -62,20 +62,22 @@ def createAccountsForTransactions(book, registerCsv):
         print("{} asset accounts".format(len(accounts)))
 
     currency = book.default_currency
-    assetsAccount = piecash.Account(name="Assets",
-                                    type="ASSET",
-                                    parent=book.root_account,
-                                    commodity=currency,
-                                    placeholder=True)
-    assetsAccount = piecash.Account(name="Current Assets",
-                                    type="ASSET",
-                                    parent=assetsAccount,
-                                    commodity=currency,
-                                    placeholder=True)
-    for account in accounts:
-        piecash.Account(name=account,
+
+    # Create bank accounts
+    account = piecash.Account(name="Assets",
+                              type="ASSET",
+                              parent=book.root_account,
+                              commodity=currency,
+                              placeholder=True)
+    account = piecash.Account(name="Current Assets",
+                              type="ASSET",
+                              parent=account,
+                              commodity=currency,
+                              placeholder=True)
+    for accountName in accounts:
+        piecash.Account(name=accountName,
                         type="ASSET",
-                        parent=assetsAccount,
+                        parent=account,
                         commodity=currency)
     book.save()
 

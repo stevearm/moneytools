@@ -1,6 +1,7 @@
 import argparse
 from collections import defaultdict
 import csv
+import re
 
 import piecash
 
@@ -55,6 +56,12 @@ def readCsvDict(filename):
     with open(filename, "r") as fileHandle:
         reader = csv.reader(fileHandle)
         header = next(reader)
+
+        # The first column has garbage in it for some reason
+        match = re.match(r"^[^\"]+\"(.+)\"$", header[0])
+        if match:
+            header[0] = match.group(1)
+
         for row in reader:
             yield dict(zip(header, row))
 

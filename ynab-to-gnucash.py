@@ -56,10 +56,18 @@ def createAccountsForCategories(book, budgetCsv):
 
 def createAccountsForTransactions(book, registerCsv):
     accounts = set()
+    incomeSources = set()
     for rowDict in readCsvDict(registerCsv):
         accounts.add(rowDict["Account"])
+        if rowDict["Category Group/Category"] == "Inflow: To be Budgeted":
+            if rowDict["Payee"] != "Starting Balance":
+                incomeSources.add(rowDict["Payee"])
+        else:
+            pass
+
     if VERBOSE:
         print("{} asset accounts".format(len(accounts)))
+        print("{} income sources".format(len(incomeSources)))
 
     currency = book.default_currency
 
@@ -79,7 +87,53 @@ def createAccountsForTransactions(book, registerCsv):
                         type="ASSET",
                         parent=account,
                         commodity=currency)
+
+    # Create equity account for starting balances
+    account = piecash.Account(name="Equity",
+                              type="EQUITY",
+                              parent=book.root_account,
+                              commodity=currency,
+                              placeholder=True)
+    account = piecash.Account(name="Opening Balances",
+                              type="EQUITY",
+                              parent=account,
+                              commodity=currency)
+
+    # Create income accounts
+    account = piecash.Account(name="Income",
+                              type="INCOME",
+                              parent=book.root_account,
+                              commodity=currency,
+                              placeholder=True)
+    for accountName in incomeSources:
+        piecash.Account(name=accountName,
+                        type="INCOME",
+                        parent=account,
+                        commodity=currency)
+
     book.save()
+
+
+def thing():
+    if "Payee" in rowDict:
+        if rowDict["Payee"] == "Starting Balance":
+            del rowDict["Category Group"]
+            del rowDict["Category"]
+            del rowDict["Date"]
+            print(rowDict)
+            if rowDict["Outflow"] != "$0.00":
+                print("ASDF")
+                # break
+            if rowDict["Memo"] != "":
+                print("ASDF")
+
+
+def importTransactions(book, registerCsv):
+    tr2 = Transaction(currency=book.default_currency,
+                      description="transfer 2",
+                      splits=[Split(account=a1, value=-100),
+                              Split(account=a2, value=100, quantity=30)
+                              ])
 
 
 def readCsvDict(filename):

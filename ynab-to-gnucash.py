@@ -1,6 +1,7 @@
 import argparse
 from collections import defaultdict
 import csv
+import functools
 import re
 
 import piecash
@@ -10,7 +11,6 @@ VERBOSE=False
 def main():
     parser = argparse.ArgumentParser(description="Create a GNUCash book from YNAB export")
     parser.add_argument("--verbose", action="store_true", help="Print lots of messages")
-    parser.add_argument("--budget", required=True, help="Budget csv to read from")
     parser.add_argument("--register", required=True, help="Register csv to read from")
     parser.add_argument("--book", default="book.gnucash", help="Output file to overwrite")
     args = parser.parse_args()
@@ -20,8 +20,65 @@ def main():
 
     book = piecash.create_book(sqlite_file=args.book, overwrite=True, currency="USD")
 
-    createAccountsForCategories(book, args.budget)
-    createAccountsForTransactions(book, args.register)
+    importRegister(book, args.register)
+    print("Accounts: {}".format(book.accounts))
+    getAccount(book, ["Thingy"])
+
+
+def importRegister(book, register):
+    for entry in readCsvDict(register):
+        if entry["Payee"] == "Starting Balance":
+            if entry["Outflow"] != "$0.00" or entry["Inflow"] != "$0.00":
+                if VERBOSE:
+                    print("Creating starting balance of {} for {}".format(entry["Inflow"], entry["Account"]))
+                balanceAccount = getStartingBalanceAccount(book)
+
+
+def getAccount(book, names):
+    return functools.reduce(lambda b, n: b.children(name=n), names, book.root_account)
+
+
+def getStartingBalanceAccount(book):
+    if len(book.accounts) == 0:
+        if VERBOSE:
+            print("Creating start balance account")
+        account = piecash.Account(name="Equity",
+                                  type="EQUITY",
+                                  parent=book.root_account,
+                                  commodity=book.default_currency,
+                                  placeholder=True)
+        account = piecash.Account(name="Opening Balances",
+                                  type="EQUITY",
+                                  parent=account,
+                                  commodity=book.default_currency)
+        book.save()
+    return getAccount(book, ["Equity", "Opening Balances"])
+
+
+def getBankAccount(book, name):
+    if len(book.accounts) == 0:
+        if VERBOSE:
+            print("Creating start balance account")
+        account = piecash.Account(name="Assets",
+                                  type="ASSET",
+                                  parent=book.root_account,
+                                  commodity=book.default_currency,
+                                  placeholder=True)
+        account = piecash.Account(name="Current Assets",
+                                  type="ASSET",
+                                  parent=account,
+                                  commodity=book.default_currency,
+                                  placeholder=True)
+        book.save()
+        return account
+    # print(book.root_account.children(name="Current Assets")accounts)
+    return None
+
+   #  root = book.root_account              # select the root_account
+   # ...: assets = root.children(name="Assets")   # select child account by name
+   # ...: cur_assets = assets.children[0]         # select child account by index
+   # ...: cash = cur_assets.children(type="CASH") # select child account by type
+   # ...: print(cash)
 
 
 def createAccountsForCategories(book, budgetCsv):

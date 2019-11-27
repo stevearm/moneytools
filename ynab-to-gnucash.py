@@ -1,196 +1,219 @@
 import argparse
 from collections import defaultdict
 import csv
+from datetime import datetime
+from decimal import Decimal
 import functools
+import operator
 import re
 
 import piecash
 
 VERBOSE=False
+TOLERANT=False
 
 def main():
     parser = argparse.ArgumentParser(description="Create a GNUCash book from YNAB export")
     parser.add_argument("--verbose", action="store_true", help="Print lots of messages")
+    parser.add_argument("--tolerant", action="store_true", help="Tolerate strange transactions")
     parser.add_argument("--register", required=True, help="Register csv to read from")
     parser.add_argument("--book", default="book.gnucash", help="Output file to overwrite")
     args = parser.parse_args()
 
     global VERBOSE
     VERBOSE=args.verbose
+    global TOLERANT
+    TOLERANT=args.tolerant
 
     book = piecash.create_book(sqlite_file=args.book, overwrite=True, currency="USD")
 
     importRegister(book, args.register)
-    print("Accounts: {}".format(book.accounts))
-    getAccount(book, ["Thingy"])
+    book.save()
+
+
+def tolerableError(message):
+    if not TOLERANT:
+        raise Exception(message)
+    print(message)
 
 
 def importRegister(book, register):
+    printOnceSet = set()
+    def printOnce(tag, message):
+        if tag in printOnceSet:
+            return
+        # printOnceSet.add(tag)
+        print(message)
+
+    transfers = list()
+
     for entry in readCsvDict(register):
+        # Ignore some garbage
+        del entry["Cleared"]
+        del entry["Category Group/Category"]
+        del entry["Flag"]
+
+        # Gather general info
+        account = getBankAccount(book, entry["Account"])
+        entryDateTime = datetime.strptime(entry["Date"], "%m/%d/%Y")
+        categoryGroup = entry["Category Group"]
+        category = entry["Category"]
+        description = entry["Payee"]
+        if len(entry["Memo"]) < 0:
+            description = "{} - {}".format(description, entry["Memo"])
+
+        # Figure out balance adjustment
+        inflow = Decimal(entry["Inflow"][1:])
+        outflow = Decimal(entry["Outflow"][1:])
+        netflow = inflow - outflow
+        if inflow != Decimal() and outflow != Decimal():
+            raise Exception("Single entry with inflow and outflow: {}".format(entry))
+
+        # Process entry
         if entry["Payee"] == "Starting Balance":
-            if entry["Outflow"] != "$0.00" or entry["Inflow"] != "$0.00":
+            if netflow != Decimal():
                 if VERBOSE:
-                    print("Creating starting balance of {} for {}".format(entry["Inflow"], entry["Account"]))
-                balanceAccount = getStartingBalanceAccount(book)
+                    print("Creating starting balance of {} for {}".format(netflow, account))
+                # Maintain: Assets - Liabilities = Equity + (Income - Expenses)
+                createTransaction(book, entryDateTime, dict(description="Starting Balance", splits=[
+                                  dict(account=getStartingBalanceAccount(book), value=-netflow),
+                                  dict(account=account, value=netflow)]))
+                optimizedSave(book)
+        elif entry["Payee"].startswith("Transfer : "):
+            otherAccount = entry["Payee"][len("Transfer : "):]
+            if netflow == Decimal():
+                raise Exception("Transfers of $0 make no sense".format(entry))
+            if netflow > Decimal():
+                fromAccount = otherAccount
+                toAccount = entry["Account"]
+                amount = netflow
+                action = "recieve"
+            else:
+                fromAccount = entry["Account"]
+                toAccount = otherAccount
+                amount = -netflow
+                action = "send"
 
+            # Add to transfers: (entryDateTime, fromString, toString, amount, action)
+            transfers.append((entryDateTime, fromAccount, toAccount, amount, action))
 
-def getAccount(book, names):
-    return functools.reduce(lambda b, n: b.children(name=n), names, book.root_account)
+        elif categoryGroup == "Inflow":
+            if category != "To be Budgeted":
+                raise Exception("Unexpected inflow: {}".format(entry))
+            if outflow != Decimal():
+                tolerableError("Inflow: To be Budgeted shouldn't have outflow: {}".format(entry))
+            if netflow == Decimal():
+                raise Exception("Inflow shouldn't have 0 balance: {}".format(entry))
+            createTransaction(book, entryDateTime, dict(description=description, splits=[
+                              dict(account=getIncomeAccount(book, entry["Payee"]), value=-netflow),
+                              dict(account=account, value=netflow)]))
+        elif categoryGroup in ["Everyday Expenses",
+                               "Long term",
+                               "Yearly Fees",
+                               "Hidden Categories",
+                               "Monthly Bills",
+                               "Trips"]:
+            if netflow == Decimal():
+                tolerableError("Expense shouldn't have 0 money flow: {}".format(entry))
+
+            createTransaction(book, entryDateTime, dict(description=description, splits=[
+                              dict(account=getExpenseAccount(book, categoryGroup, category), value=-netflow),
+                              dict(account=account, value=netflow)]))
+        elif categoryGroup == "":
+            incomeAccount, expenseAccount = getUncategorized(book)
+            if netflow > Decimal():
+                otherAccount = incomeAccount
+            else:
+                otherAccount = expenseAccount
+            createTransaction(book, entryDateTime, dict(description=description, splits=[
+                              dict(account=otherAccount, value=-netflow),
+                              dict(account=account, value=netflow)]))
+        else:
+            raise Exception("Unexpected row: {}".format(entry))
+
+    # Handle transfers (entryDateTime, fromString, toString, amount, action)
+    for index in range(len(transfers[0]) - 1, -1, -1):
+        transfers = sorted(transfers, key=operator.itemgetter(index))
+    while len(transfers) > 0:
+        if len(transfers) == 1:
+            raise Exception("Unbalanced transfers: {}".format(transfers[0]))
+        first = transfers[0]
+        second = transfers[1]
+        transfers = transfers[2:]
+        for index in range(4):
+            if first[index] != second[index]:
+                raise Exception("These transfers aren't paired: {} - {}".format(first, second))
+        if sorted([first[-1], second[-1]]) != ["recieve", "send"]:
+            raise Exception("These transfers aren't double ended: {} - {}".format(first, second))
+        createTransaction(book, entryDateTime, dict(description="Transfer", splits=[
+                          dict(account=getBankAccount(book, first[1]), value=-first[3]),
+                          dict(account=getBankAccount(book, first[2]), value=first[3])]))
 
 
 def getStartingBalanceAccount(book):
-    if len(book.accounts) == 0:
-        if VERBOSE:
-            print("Creating start balance account")
-        account = piecash.Account(name="Equity",
-                                  type="EQUITY",
-                                  parent=book.root_account,
-                                  commodity=book.default_currency,
-                                  placeholder=True)
-        account = piecash.Account(name="Opening Balances",
-                                  type="EQUITY",
-                                  parent=account,
-                                  commodity=book.default_currency)
-        book.save()
-    return getAccount(book, ["Equity", "Opening Balances"])
+    return getAccount(book, [("Equity", dict(type="EQUITY", placeholder=True)),
+                             ("Opening Balances", dict(type="EQUITY"))])
 
 
 def getBankAccount(book, name):
-    if len(book.accounts) == 0:
-        if VERBOSE:
-            print("Creating start balance account")
-        account = piecash.Account(name="Assets",
-                                  type="ASSET",
-                                  parent=book.root_account,
-                                  commodity=book.default_currency,
-                                  placeholder=True)
-        account = piecash.Account(name="Current Assets",
-                                  type="ASSET",
-                                  parent=account,
-                                  commodity=book.default_currency,
-                                  placeholder=True)
+    return getAccount(book, [("Assets", dict(type="ASSET", placeholder=True)),
+                             ("Current Assets", dict(type="ASSET", placeholder=True)),
+                             (name, dict(type="ASSET"))])
+
+
+def getExpenseAccount(book, categoryGroup, category):
+    return getAccount(book, [("Expense", dict(type="EXPENSE", placeholder=True)),
+                             (categoryGroup, dict(type="EXPENSE", placeholder=True)),
+                             (category, dict(type="EXPENSE"))])
+
+
+def getIncomeAccount(book, source):
+    source = source.replace(":", "_")
+    return getAccount(book, [("Income", dict(type="INCOME", placeholder=True)),
+                             (source, dict(type="INCOME"))])
+
+
+def getUncategorized(book):
+    income = getAccount(book, [("Income", dict(type="INCOME", placeholder=True)),
+                               ("Uncategorized", dict(type="INCOME"))])
+    expense = getAccount(book, [("Expense", dict(type="EXPENSE", placeholder=True)),
+                                ("Uncategorized", dict(type="EXPENSE"))])
+    return income, expense
+
+
+def getAccount(book, names):
+    account = book.root_account
+    for name, args in names:
+        try:
+            account = account.children(name=name)
+        except KeyError:
+            args["name"] = name
+            args["parent"] = account
+            args["commodity"] = book.default_currency
+            account = piecash.Account(**args)
+            optimizedSave(book)
+    return account
+
+
+def createTransaction(book, entryDateTime, args):
+    args["currency"] = book.default_currency
+    args["post_date"] = entryDateTime.date()
+    args["enter_date"] = entryDateTime
+    splitArgs = args["splits"]
+    args["splits"] = []
+    for splitArg in splitArgs:
+        args["splits"].append(piecash.Split(**splitArg))
+    piecash.Transaction(**args)
+    optimizedSave(book)
+
+
+__optimizedSaveCounter = 0
+def optimizedSave(book):
+    global __optimizedSaveCounter
+    if __optimizedSaveCounter <= 0:
+        __optimizedSaveCounter = 100
         book.save()
-        return account
-    # print(book.root_account.children(name="Current Assets")accounts)
-    return None
-
-   #  root = book.root_account              # select the root_account
-   # ...: assets = root.children(name="Assets")   # select child account by name
-   # ...: cur_assets = assets.children[0]         # select child account by index
-   # ...: cash = cur_assets.children(type="CASH") # select child account by type
-   # ...: print(cash)
-
-
-def createAccountsForCategories(book, budgetCsv):
-    groups = defaultdict(set)
-    for rowDict in readCsvDict(budgetCsv):
-        groups[rowDict["Category Group"]].add(rowDict["Category"])
-
-    if VERBOSE:
-        print("{} groups with a total of {} categories".format(
-            len(groups),
-            sum([len(groups[x]) for x in groups.keys()])))
-
-    currency = book.default_currency
-    expensesAccount = piecash.Account(name="Expenses",
-                                      type="EXPENSE",
-                                      parent=book.root_account,
-                                      commodity=currency,
-                                      placeholder=True,)
-    for group, categories in groups.items():
-        groupAccount = piecash.Account(name=group,
-                                       type="EXPENSE",
-                                       parent=expensesAccount,
-                                       commodity=currency,
-                                       placeholder=True,)
-        for category in categories:
-            piecash.Account(name=category,
-                            type="EXPENSE",
-                            parent=groupAccount,
-                            commodity=currency)
-    book.save()
-
-
-def createAccountsForTransactions(book, registerCsv):
-    accounts = set()
-    incomeSources = set()
-    for rowDict in readCsvDict(registerCsv):
-        accounts.add(rowDict["Account"])
-        if rowDict["Category Group/Category"] == "Inflow: To be Budgeted":
-            if rowDict["Payee"] != "Starting Balance":
-                incomeSources.add(rowDict["Payee"])
-        else:
-            pass
-
-    if VERBOSE:
-        print("{} asset accounts".format(len(accounts)))
-        print("{} income sources".format(len(incomeSources)))
-
-    currency = book.default_currency
-
-    # Create bank accounts
-    account = piecash.Account(name="Assets",
-                              type="ASSET",
-                              parent=book.root_account,
-                              commodity=currency,
-                              placeholder=True)
-    account = piecash.Account(name="Current Assets",
-                              type="ASSET",
-                              parent=account,
-                              commodity=currency,
-                              placeholder=True)
-    for accountName in accounts:
-        piecash.Account(name=accountName,
-                        type="ASSET",
-                        parent=account,
-                        commodity=currency)
-
-    # Create equity account for starting balances
-    account = piecash.Account(name="Equity",
-                              type="EQUITY",
-                              parent=book.root_account,
-                              commodity=currency,
-                              placeholder=True)
-    account = piecash.Account(name="Opening Balances",
-                              type="EQUITY",
-                              parent=account,
-                              commodity=currency)
-
-    # Create income accounts
-    account = piecash.Account(name="Income",
-                              type="INCOME",
-                              parent=book.root_account,
-                              commodity=currency,
-                              placeholder=True)
-    for accountName in incomeSources:
-        piecash.Account(name=accountName,
-                        type="INCOME",
-                        parent=account,
-                        commodity=currency)
-
-    book.save()
-
-
-def thing():
-    if "Payee" in rowDict:
-        if rowDict["Payee"] == "Starting Balance":
-            del rowDict["Category Group"]
-            del rowDict["Category"]
-            del rowDict["Date"]
-            print(rowDict)
-            if rowDict["Outflow"] != "$0.00":
-                print("ASDF")
-                # break
-            if rowDict["Memo"] != "":
-                print("ASDF")
-
-
-def importTransactions(book, registerCsv):
-    tr2 = Transaction(currency=book.default_currency,
-                      description="transfer 2",
-                      splits=[Split(account=a1, value=-100),
-                              Split(account=a2, value=100, quantity=30)
-                              ])
+    __optimizedSaveCounter -= 1
 
 
 def readCsvDict(filename):

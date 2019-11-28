@@ -1,5 +1,5 @@
 import argparse
-from collections import defaultdict
+from collections import defaultdict, namedtuple
 import csv
 from datetime import datetime
 from decimal import Decimal
@@ -47,30 +47,25 @@ def importRegister(book, register):
 
     transfers = list()
 
-    for entry in readCsvDict(register):
-        # Ignore some garbage
-        del entry["Cleared"]
-        del entry["Category Group/Category"]
-        del entry["Flag"]
-
+    for entry in readRegister(register):
         # Gather general info
-        account = getBankAccount(book, entry["Account"])
-        entryDateTime = datetime.strptime(entry["Date"], "%m/%d/%Y")
-        categoryGroup = entry["Category Group"]
-        category = entry["Category"]
-        description = entry["Payee"]
-        if len(entry["Memo"]) < 0:
-            description = "{} - {}".format(description, entry["Memo"])
+        account = getBankAccount(book, entry.account)
+        entryDateTime = datetime.strptime(entry.date, "%m/%d/%Y")
+        categoryGroup = entry.categoryGroup
+        category = entry.category
+        description = entry.payee
+        if len(entry.memo) < 0:
+            description = "{} - {}".format(description, entry.memo)
 
         # Figure out balance adjustment
-        inflow = Decimal(entry["Inflow"][1:])
-        outflow = Decimal(entry["Outflow"][1:])
+        inflow = Decimal(entry.inflow[1:])
+        outflow = Decimal(entry.outflow[1:])
         netflow = inflow - outflow
         if inflow != Decimal() and outflow != Decimal():
             raise Exception("Single entry with inflow and outflow: {}".format(entry))
 
         # Process entry
-        if entry["Payee"] == "Starting Balance":
+        if entry.payee == "Starting Balance":
             if netflow != Decimal():
                 if VERBOSE:
                     print("Creating starting balance of {} for {}".format(netflow, account))
@@ -79,17 +74,17 @@ def importRegister(book, register):
                                   dict(account=getStartingBalanceAccount(book), value=-netflow),
                                   dict(account=account, value=netflow)]))
                 optimizedSave(book)
-        elif entry["Payee"].startswith("Transfer : "):
-            otherAccount = entry["Payee"][len("Transfer : "):]
+        elif entry.payee.startswith("Transfer : "):
+            otherAccount = entry.payee[len("Transfer : "):]
             if netflow == Decimal():
                 raise Exception("Transfers of $0 make no sense".format(entry))
             if netflow > Decimal():
                 fromAccount = otherAccount
-                toAccount = entry["Account"]
+                toAccount = entry.account
                 amount = netflow
                 action = "recieve"
             else:
-                fromAccount = entry["Account"]
+                fromAccount = entry.account
                 toAccount = otherAccount
                 amount = -netflow
                 action = "send"
@@ -105,7 +100,7 @@ def importRegister(book, register):
             if netflow == Decimal():
                 raise Exception("Inflow shouldn't have 0 balance: {}".format(entry))
             createTransaction(book, entryDateTime, dict(description=description, splits=[
-                              dict(account=getIncomeAccount(book, entry["Payee"]), value=-netflow),
+                              dict(account=getIncomeAccount(book, entry.payee), value=-netflow),
                               dict(account=account, value=netflow)]))
         elif categoryGroup in ["Everyday Expenses",
                                "Long term",
@@ -216,7 +211,7 @@ def optimizedSave(book):
     __optimizedSaveCounter -= 1
 
 
-def readCsvDict(filename):
+def readRegister(filename):
     with open(filename, "r") as fileHandle:
         reader = csv.reader(fileHandle)
         header = next(reader)
@@ -226,8 +221,12 @@ def readCsvDict(filename):
         if match:
             header[0] = match.group(1)
 
+        if header != ["Account", "Flag", "Date", "Payee", "Category Group/Category", "Category Group", "Category", "Memo", "Outflow", "Inflow", "Cleared"]:
+            raise Exception("Unknown format: {}".format(header))
+
+        RegisterEntry = namedtuple("RegisterEntry", ["account", "date", "payee", "categoryGroup", "category", "memo", "outflow", "inflow"])
         for row in reader:
-            yield dict(zip(header, row))
+            yield RegisterEntry(row[0], *row[2:4], *row[5:10])
 
 
 if __name__ == "__main__":

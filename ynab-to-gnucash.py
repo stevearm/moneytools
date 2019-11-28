@@ -16,7 +16,7 @@ def main():
     parser = argparse.ArgumentParser(description="Create a GNUCash book from YNAB export")
     parser.add_argument("--verbose", action="store_true", help="Print lots of messages")
     parser.add_argument("--tolerant", action="store_true", help="Tolerate strange transactions")
-    parser.add_argument("--register", required=True, help="Register csv to read from")
+    parser.add_argument("register", help="Register csv to read from")
     parser.add_argument("--book", default="book.gnucash", help="Output file to overwrite")
     args = parser.parse_args()
 
